@@ -1,0 +1,7 @@
+opencv-python>=4.5
+numpy>=1.21
+scipy>=1.7
+matplotlib>=3.4
+Pillow>=8.2
+pdf2image>=1.16; extra == "pdf"
+scikit-image>=0.18
