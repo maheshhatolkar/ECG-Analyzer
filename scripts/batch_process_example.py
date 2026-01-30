@@ -1,4 +1,8 @@
-"""Example script to batch-process ECG files in a folder."""
+"""Batch-process ECG image files in a folder.
+
+This convenience script demonstrates how to process many ECG files in a
+single directory and export per-file results. It supports PNG/JPG/PDF.
+"""
 import os
 import argparse
 from glob import glob
@@ -13,6 +17,7 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
+    # Look for common image/PDF file types in the folder
     patterns = ['*.png', '*.jpg', '*.jpeg', '*.pdf']
     files = []
     for p in patterns:
@@ -24,6 +29,7 @@ def main():
             process_file(f, out_path, args.format, show_plot=False)
             print(f"Processed {f} -> {out_path}")
         except Exception as e:
+            # Continue processing remaining files even if one fails
             print(f"Failed {f}: {e}")
 
 

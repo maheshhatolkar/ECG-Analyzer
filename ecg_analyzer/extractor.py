@@ -9,6 +9,20 @@ import cv2
 from PIL import Image
 from scipy.signal import find_peaks, butter, filtfilt
 import matplotlib.pyplot as plt
+"""
+ECG image processing and feature extraction helpers.
+
+This module provides functions to:
+- load ECG images (PNG/JPEG/PDF)
+- validate and preprocess images (deskew, enhance, remove gridlines)
+- digitize the ECG trace into a 1-D signal
+- detect R-peaks using a Pan-Tompkins-style detector with adaptive thresholding
+- refine peaks using template matching
+- detect P/Q/R/S/T fiducial points and compute intervals
+
+The functions are intentionally small and composable so they can be
+tested independently and reused by the CLI, GUI, and web components.
+"""
 import math
 
 try:
@@ -36,8 +50,14 @@ def load_adaptive_params(path: str):
 
 
 def load_image(path: str) -> np.ndarray:
+    """Load an image from `path` and return an OpenCV BGR ndarray.
+
+    Supports common image formats and single-page PDFs (requires pdf2image).
+    The output is BGR to be consistent with OpenCV operations used elsewhere.
+    """
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
+        # Convert first PDF page to image (requires external poppler binary)
         if convert_from_path is None:
             raise RuntimeError("pdf2image not available; install pdf2image and poppler")
         pages = convert_from_path(path, dpi=200)
@@ -50,6 +70,11 @@ def load_image(path: str) -> np.ndarray:
 
 
 def validate_image_quality(img: np.ndarray) -> Tuple[bool, str]:
+    """Quick checks to ensure the image is processable.
+
+    Returns (ok, message). Uses basic heuristics: minimum pixel count and
+    fraction of non-white pixels to detect blank/overexposed scans.
+    """
     h, w = img.shape[:2]
     if w * h < 20000:
         return False, "Image resolution too small"
@@ -61,6 +86,11 @@ def validate_image_quality(img: np.ndarray) -> Tuple[bool, str]:
 
 
 def deskew_image(img: np.ndarray) -> np.ndarray:
+    """Detect dominant line angles and rotate the image to correct skew.
+
+    Uses probabilistic Hough lines on Canny edges to estimate a median
+    angle; small angles (<0.1 deg) are ignored to avoid unnecessary resampling.
+    """
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 50, 150)
     lines = cv2.HoughLinesP(edges, 1, np.pi / 180, 100, minLineLength=100, maxLineGap=10)
@@ -82,6 +112,10 @@ def deskew_image(img: np.ndarray) -> np.ndarray:
 
 
 def enhance_image(img: np.ndarray) -> np.ndarray:
+    """Apply contrast-limited adaptive histogram equalization to the L channel.
+
+    Improves local contrast for scanned ECGs that may be unevenly illuminated.
+    """
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
@@ -93,13 +127,15 @@ def enhance_image(img: np.ndarray) -> np.ndarray:
 
 def remove_gridlines(gray: np.ndarray) -> np.ndarray:
     # Morphological approach to reduce gridlines while preserving waveform
+    # 1) Binarize (inverted) so trace and dark grid become white
     img_bin = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 15, 8)
-    # remove thin lines
+    # 2) Remove long horizontal and vertical lines using open
     kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
     kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
     removed_h = cv2.morphologyEx(img_bin, cv2.MORPH_OPEN, kernel_h)
     removed_v = cv2.morphologyEx(img_bin, cv2.MORPH_OPEN, kernel_v)
     grid = cv2.bitwise_or(removed_h, removed_v)
+    # 3) Mask out the detected grid from the binarized image
     cleaned = cv2.bitwise_and(img_bin, cv2.bitwise_not(grid))
     return cleaned
 
@@ -119,17 +155,17 @@ def extract_waveform(cleaned: np.ndarray) -> Tuple[np.ndarray, float]:
             xs.append(x)
             ys.append(y)
     ys = np.array(ys)
-    # interpolate missing
+    # interpolate missing columns to produce continuous trace
     nans = np.isnan(ys)
     if nans.any():
         ys[nans] = np.interp(np.flatnonzero(nans), np.flatnonzero(~nans), ys[~nans])
-    signal = h - ys  # invert to make upward positive
-    # normalize
+    # invert so larger amplitude -> larger positive values and normalize
+    signal = h - ys
     signal = (signal - np.mean(signal)) / (np.std(signal) + 1e-9)
-    # try to detect grid spacing to calculate seconds per pixel
+    # attempt to discover time calibration (seconds per pixel) from grid
     seconds_per_pixel = detect_grid_seconds_per_pixel(cleaned)
     if seconds_per_pixel is None:
-        # fallback conservative guess (250 Hz implies 0.004s)
+        # fallback conservative guess (250 Hz sampling equivalent)
         seconds_per_pixel = 0.004
     return signal, seconds_per_pixel
 
@@ -153,13 +189,27 @@ def detect_grid_seconds_per_pixel(cleaned: np.ndarray) -> Optional[float]:
 
 
 def bandpass(signal: np.ndarray, fs: float, low: float = 0.5, high: float = 40.0) -> np.ndarray:
+    """Apply a 2nd-order Butterworth bandpass filter and zero-phase filter the signal.
+
+    This helps isolate QRS energy while preserving waveform morphology.
+    """
     nyq = 0.5 * fs
     b, a = butter(2, [low / nyq, high / nyq], btype='band')
     return filtfilt(b, a, signal)
 
 
 def detect_r_peaks_pan_tompkin(signal: np.ndarray, fs: float) -> np.ndarray:
-    # Pan-Tompkins style detector (simplified)
+    """Simplified Pan–Tompkins detector.
+
+    Steps:
+    1) Bandpass to emphasize QRS (default 5-15 Hz)
+    2) Differentiate to highlight slope information
+    3) Square to make all values positive and emphasize large slopes
+    4) Moving-window integrate to collect energy over a short window
+    5) Peak-pick on integrated signal using an adaptive threshold
+
+    Returns integer sample indices of detected R-peaks (unrefined).
+    """
     # 1) Bandpass around QRS
     low, high = 5.0, 15.0
     nyq = 0.5 * fs
@@ -194,7 +244,14 @@ def detect_r_peaks_pan_tompkin(signal: np.ndarray, fs: float) -> np.ndarray:
 
 
 def refine_peaks_with_template(signal: np.ndarray, r_peaks: np.ndarray, fs: float, half_window_ms: int = 60) -> np.ndarray:
-    """Refine R-peak indices using cross-correlation with an averaged template."""
+    """Refine R-peak indices using cross-correlation with an averaged template.
+
+    For each detected beat, take a window around the R index, align multiple
+    beats by their local maxima to form a template, then cross-correlate the
+    template with each beat to refine the peak location. This helps correct
+    small timing jitter and produces more consistent fiducials for downstream
+    P/Q/S/T searches.
+    """
     if len(r_peaks) == 0:
         return r_peaks
     hw = max(1, int((half_window_ms / 1000.0) * fs))
@@ -207,11 +264,10 @@ def refine_peaks_with_template(signal: np.ndarray, r_peaks: np.ndarray, fs: floa
             beats.append(seg)
     if len(beats) < 3:
         return r_peaks
-    # align by max within each beat
+    # align by max within each beat and build average template
     aligned = []
     for seg in beats:
         shift = np.argmax(np.abs(seg))
-        # center the peak
         pad_left = hw - shift
         if pad_left >= 0:
             aligned_seg = np.pad(seg, (pad_left, 0), mode='constant')[:2 * hw]
@@ -227,7 +283,6 @@ def refine_peaks_with_template(signal: np.ndarray, r_peaks: np.ndarray, fs: floa
         hi = min(len(signal), r + hw)
         seg = signal[lo:hi]
         if seg.size < template.size:
-            # pad
             seg = np.pad(seg, (0, template.size - seg.size), mode='constant')
         corr = np.correlate(seg, template, mode='full')
         shift = np.argmax(corr) - (len(seg) - 1)

@@ -1,3 +1,11 @@
+"""Simple Tkinter-based GUI for interactive ECG image processing.
+
+The GUI lets the user choose an ECG image, runs the processing pipeline and
+displays the original image plus a waveform plot. The plot supports zoom/pan
+via the Matplotlib navigation toolbar and toggles to show/hide gridlines and
+feature markers.
+"""
+
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
@@ -6,11 +14,12 @@ from PIL import Image, ImageTk
 import numpy as np
 import cv2
 
-from .extractor import process_file
+from .extractor import process_file, extract_waveform, load_image
 
 
 class ECGAnalyzerGUI:
     def __init__(self, root):
+        """Create main window widgets and initialize state."""
         self.root = root
         root.title('ECG Analyzer')
         self.frame = tk.Frame(root)
@@ -21,9 +30,11 @@ class ECGAnalyzerGUI:
         tk.Button(btn_frame, text='Open Image', command=self.open_image).pack(side=tk.LEFT)
         tk.Button(btn_frame, text='Export JSON', command=self.export_json).pack(side=tk.LEFT)
 
+        # Thumbnail area for original image
         self.img_label = tk.Label(self.frame)
         self.img_label.pack(side=tk.TOP, padx=4, pady=4)
 
+        # Embedded Matplotlib plot with navigation toolbar for zoom/pan
         self.fig, self.ax = plt.subplots(figsize=(6, 3))
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.frame)
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -31,7 +42,7 @@ class ECGAnalyzerGUI:
         toolbar.update()
         self.canvas._tkcanvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        # overlay options
+        # Overlay toggles
         opts_frame = tk.Frame(self.frame)
         opts_frame.pack(side=tk.TOP, fill=tk.X)
         self.show_grid = tk.BooleanVar(value=False)
@@ -39,9 +50,14 @@ class ECGAnalyzerGUI:
         tk.Checkbutton(opts_frame, text='Show Markers', variable=self.show_markers, command=self.redraw).pack(side=tk.LEFT)
         tk.Checkbutton(opts_frame, text='Show Grid', variable=self.show_grid, command=self.redraw).pack(side=tk.LEFT)
 
+        # Processing state
         self.current_result = None
+        self.current_signal = None
+        self.current_seconds_per_pixel = None
+        self.current_features = None
 
     def open_image(self):
+        """Open a file dialog, process the selected file, and display results."""
         path = filedialog.askopenfilename(filetypes=[('Images', '*.png;*.jpg;*.jpeg;*.pdf')])
         if not path:
             return
@@ -51,18 +67,16 @@ class ECGAnalyzerGUI:
             messagebox.showerror('Error', str(e))
             return
         self.current_result = res
-        # show original image thumbnail
-        from .extractor import load_image, extract_waveform
 
+        # Show original image thumbnail
         img = load_image(path)
-        h, w = img.shape[:2]
         pil = Image.fromarray(img[:, :, ::-1])
         pil.thumbnail((600, 400))
         tkimg = ImageTk.PhotoImage(pil)
         self.img_label.configure(image=tkimg)
         self.img_label.image = tkimg
 
-        # plot waveform and markers (store and redraw)
+        # Extract waveform and redraw plot
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         signal, seconds_per_pixel = extract_waveform(gray)
         self.current_signal = signal
@@ -71,6 +85,7 @@ class ECGAnalyzerGUI:
         self.redraw()
 
     def redraw(self):
+        """Redraw the waveform plot with overlays according to toggles."""
         if getattr(self, 'current_signal', None) is None:
             return
         signal = self.current_signal
@@ -84,7 +99,6 @@ class ECGAnalyzerGUI:
         if self.show_markers.get() and len(r_peaks):
             self.ax.plot(np.array(r_peaks) * seconds_per_pixel, signal[r_peaks], 'ro')
         if self.show_grid.get():
-            # simple vertical gridlines using seconds_per_pixel and 0.04s small boxes
             if seconds_per_pixel and seconds_per_pixel > 0:
                 box_pixels = int(0.04 / seconds_per_pixel)
                 if box_pixels < 1:
@@ -98,6 +112,7 @@ class ECGAnalyzerGUI:
         self.canvas.draw()
 
     def export_json(self):
+        """Export the last processing result to a JSON file chosen by the user."""
         if not self.current_result:
             messagebox.showinfo('Info', 'No result to export')
             return

@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>ECG Analyzer Web</title>
+    <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
+  </head>
+  <body>
+    <h3>ECG Analyzer</h3>
+    <form id="uploadForm">
+      <input type="file" id="fileInput" name="file" accept="image/*,.pdf" />
+      <button type="submit">Upload & Process</button>
+    </form>
+    <div id="result"></div>
+    <div id="plot" style="width:800px;height:300px;"></div>
+
+    <script>
+      const form = document.getElementById('uploadForm')
+      form.addEventListener('submit', async (ev) => {
+        ev.preventDefault()
+        const fi = document.getElementById('fileInput')
+        if (!fi.files.length) return alert('Select a file')
+        const fd = new FormData();
+        fd.append('file', fi.files[0])
+        const res = await fetch('/process', {method:'POST', body: fd})
+        const j = await res.json()
+        if (j.error) { document.getElementById('result').innerText = 'Error: ' + j.error; return }
+        document.getElementById('result').innerText = JSON.stringify(j.features, null, 2)
+        // try to plot signal if available via features (r_peaks only). For now only show markers.
+        if (j.features && j.features.r_peaks_indices) {
+          const r = j.features.r_peaks_indices
+          const t = j.features.r_peaks_times
+          const trace = { x: t, y: Array(t.length).fill(0), mode:'markers', marker:{color:'red', size:6}, name:'R peaks' }
+          Plotly.newPlot('plot', [trace], {title:'Detected R-peaks (times)'} )
+        }
+      })
+    </script>
+  </body>
+ </html>

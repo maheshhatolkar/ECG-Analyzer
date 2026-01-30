@@ -1,7 +1,14 @@
-"""Train adaptive Pan-Tompkins threshold multiplier from example signals.
-This script accepts one or more WAV/PNG examples or generates synthetic signals.
-Outputs `model_params.json` in project root.
+"""Small utility to train/save adaptive Pan–Tompkins parameters.
+
+This script is intentionally simple: it produces a reasonable default for
+`integrated_multiplier` used by the detector. In practice you'd pass a set
+of labeled ECG signals and pick the multiplier that best matches annotated
+R-peak positions.
+
+The produced JSON file can be loaded with `load_adaptive_params()` from
+`ecg_analyzer.extractor` to influence detection thresholds.
 """
+
 import argparse
 import json
 import os
@@ -11,7 +18,11 @@ from ecg_analyzer.extractor import detect_r_peaks_pan_tompkin, refine_peaks_with
 
 
 def compute_multiplier_from_signal(signal, fs):
-    # replicate steps from detector to get integrated signal
+    """Compute a baseline mean/std and return a starter multiplier.
+
+    For now this uses a fixed heuristic: returns (mean, std, mult). A future
+    implementation should optimize `mult` to match provided annotations.
+    """
     from scipy.signal import butter, filtfilt
     low, high = 5.0, 15.0
     nyq = 0.5 * fs
@@ -24,8 +35,7 @@ def compute_multiplier_from_signal(signal, fs):
     integrated = np.convolve(squared, window, mode='same')
     mean = float(np.mean(integrated))
     std = float(np.std(integrated))
-    # choose multiplier that yields a few peaks: simple heuristic
-    # target: integrated threshold = mean + mult*std where peaks ~ 0.9*(duration in s)
+    # Simple default multiplier; replace with a search over labeled data later
     mult = 0.5
     return mean, std, mult
 
@@ -35,7 +45,7 @@ def main():
     parser.add_argument('--out', '-o', default='model_params.json')
     args = parser.parse_args()
 
-    # For now produce a modest default multiplier computed from synthetic signals
+    # Produce a modest default multiplier using a synthetic ECG signal
     fs = 250.0
     t = np.linspace(0, 10, int(fs * 10.0))
     sig = 0.02 * np.sin(2 * np.pi * 1.0 * t)
